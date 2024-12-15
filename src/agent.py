@@ -207,7 +207,7 @@ class AIAgent:
                 # Schedule the awake action if no future events exist
                 timestamp = time.time() + 5
                 when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-                self.plan(awake, timestamp, **{"when": when})
+                self.plan(resume, timestamp, **{"when": when})
             while self.running:
                 self.pop_event()
                 time.sleep(interval)
@@ -280,7 +280,7 @@ class AIAgent:
                 timestamp = time.time() + 600
                 # Call awake function
                 when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-                self.update_plan("awake", timestamp, **{"when": when})
+                self.update_plan("resume", timestamp, **{"when": when})
 
 
     def get_next_action(self, prev_event, prev_output, prev_feedback) -> tuple:
@@ -346,11 +346,11 @@ class AIAgent:
             print(e)
 
 # TOOLS
-@register_tool({ "when": "when to wake up"})
-def awake(when=""):
-    """Wake up at specific time"""
-    print(f"Agent woke up at {when}")
-    return f"Agent woke up at {when}"
+@register_tool({ "when": "when to resume"})
+def resume(when=""):
+    """Resume at specific time"""
+    print(f"Agent resumed at {when}")
+    return f""
 
 @register_tool({"location":"a location to walk in",  "when": "when to start walking"})
 def spacewalk(location="", when=""):
