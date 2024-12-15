@@ -1,0 +1,5 @@
+CairoSVG==2.7.1
+openai==1.57.4
+Pillow==11.0.0
+Requests==2.32.3
+requests_oauthlib==2.0.0
