@@ -1,0 +1,65 @@
+# Python bytecode files
+*.pyc
+*.pyo
+__pycache__/
+
+# Virtual environment directories
+venv/
+env/
+.venv/
+
+# IDE/Editor folders and settings
+.idea/
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Environment variable files (optional)
+.env
+
+# Log files
+*.log
+
+# Build and distribution directories
+build/
+dist/
+*.egg-info/
+
+# Test and coverage reports
+.coverage
+*.cover
+*.hypothesis/
+nosetests.xml
+coverage.xml
+*.tox/
+*.nox/
+*.coverage
+*.hypothesis/
+
+# Python 3 specific
+*.pyd
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# PyInstaller
+*.spec
+
+# Pytest
+.cache/
+
+# Cython build
+cython_debug/
+
+# Skip database files
+*.db
+
+# Skip images folder
+images/
+
+# Skip images folder
+memory/
+
+*.dylib
