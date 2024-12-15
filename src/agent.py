@@ -275,6 +275,7 @@ class AIAgent:
             # Update the plan by adding follow up actions
             self.update_plan(next_action, timestamp, **params)
         else:
+            self.save_to_memory("act", "think", time.time(), json.dumps(params))
             if not self.has_future_events():
                 # Schedule the awake action if no future events exist
                 timestamp = time.time() + 600
@@ -309,7 +310,7 @@ class AIAgent:
                 # If no tool_calls, print message content
                 message_content = response.choices[0].message.content
                 print(f"Thought: {message_content}")
-                return None, {}
+                return None, { "thought": message_content}
             
         except openai.error.OpenAIError as e:
             # Handle OpenAI API errors (network issues, etc.)
