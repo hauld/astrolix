@@ -20,30 +20,7 @@ import random
 # Astrolix portrait
 # SVG content
 svg_template = """
-<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">
-  <!-- Body -->
-  <circle cx="150" cy="150" r="70" fill="black" />
-
-  <!-- Wings -->
-  <ellipse cx="80" cy="150" rx="50" ry="30" fill="black" />
-  <ellipse cx="220" cy="150" rx="50" ry="30" fill="black" />
-  
-  <!-- Eyes -->
-  <circle cx="130" cy="130" r="15" fill="white" />
-  <circle cx="170" cy="130" r="15" fill="white" />
-  
-  <!-- Pupils -->
-  <circle cx="130" cy="130" r="8" fill="blue" />
-  <circle cx="170" cy="130" r="8" fill="blue" />
-  <circle cx="130" cy="130" r="4" fill="black" />
-  <circle cx="170" cy="130" r="4" fill="black" />
-  
-  <!-- Beak -->
-  <polygon points="150,140 160,160 140,160" fill="orange" />
-  
-  <!-- Legs -->
-  <line x1="140" y1="220" x2="140" y2="250" stroke="orange" stroke-width="4" />
-  <line x1="160" y1="220" x2="160" y2="250" stroke="orange" stroke-width="4" />
+<svg width="{width}" height="{height}" baseProfile="tiny" version="1.2" xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink"><defs /><ellipse cx="100" cy="100" fill="black" rx="50" ry="45" /><circle cx="80" cy="90" fill="white" r="12" /><circle cx="120" cy="90" fill="white" r="12" /><circle cx="80" cy="90" fill="blue" r="6" /><circle cx="120" cy="90" fill="blue" r="6" /><polygon fill="orange" points="90,110 110,110 100,125" /><ellipse cx="50" cy="120" fill="black" rx="30" ry="15" /><ellipse cx="150" cy="120" fill="black" rx="30" ry="15" /><line stroke="orange" stroke-width="2" x1="85" x2="85" y1="145" y2="160" /><line stroke="orange" stroke-width="2" x1="115" x2="115" y1="145" y2="160" />
 </svg>
 """
 def take_photo(background_image_path=""):
