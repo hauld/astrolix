@@ -278,7 +278,7 @@ class AIAgent:
             self.save_to_memory("act", "think", time.time(), json.dumps(params))
             if not self.has_future_events():
                 # Schedule the awake action if no future events exist
-                timestamp = time.time() + 600
+                timestamp = time.time() + 1200
                 # Call awake function
                 when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
                 self.update_plan("resume", timestamp, **{"when": when})
@@ -349,7 +349,7 @@ class AIAgent:
 # TOOLS
 @register_tool({ "when": "when to resume"})
 def resume(when=""):
-    """Resume at specific time"""
+    """Take a break and resume at specific time"""
     print(f"Agent resumed at {when}")
     return f""
 
