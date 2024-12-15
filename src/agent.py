@@ -462,7 +462,7 @@ if __name__ == "__main__":
                         Tweet’s guidelines:
                         - NO hashtags.
                         - Avoid harmful content.
-                        - Include your character in the image prompt when taking selfies.
+                        - Leave the image_prompt field blank unless something truly special inspires you to share a visual.
 
                         Spacewalk’s guidelines:
                         - Choose a location near you.
