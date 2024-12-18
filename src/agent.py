@@ -60,7 +60,10 @@ def take_photo(background_image_path=""):
 TOOL_REGISTRY = []
 
 # Post to X or not
-POST_X = True
+POST_X = os.getenv("POST_X")
+
+# Gen image or not
+GEN_IMG = os.getenv("GEN_IMG")
 
 def python_type_to_json_type(py_type):
     type_mapping = {
@@ -126,6 +129,10 @@ class AIAgent:
         self.name = agent_name
         self.event_queue = []
         self.running = False
+        self.constraints = [
+            ("tweet_with_image", 0, 2, time.strftime("%Y-%m-%d", time.localtime(time.time()))),
+            ("tweet", 0, 15, time.strftime("%Y-%m-%d", time.localtime(time.time()))),
+        ]
         self.db_name = f"memory/{agent_name}_memory.db"
         self.init_db(guiding_principles)
 
@@ -150,6 +157,23 @@ class AIAgent:
                         VALUES (?, ?)
                     ''', (event_type, details))
                     
+                # Create table if not exists
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS resource_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        resource TEXT NOT NULL UNIQUE,
+                        usage INTEGER NOT NULL DEFAULT 0,
+                        quota INTEGER NOT NULL,
+                        last_reset TEXT NOT NULL
+                    );
+                """)
+
+                for resource, usage, quota, last_reset in self.constraints:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO resource_usage (resource, usage, quota, last_reset)
+                        VALUES (?, ?, ?, ?);
+                    """, (resource, usage, quota, last_reset))
+                
                 conn.commit()
 
     def save_to_memory(self, event_type, action_name, timestamp, details=""):
@@ -166,15 +190,74 @@ class AIAgent:
             cursor = conn.cursor()
             cursor.execute("SELECT event_type, action_name, timestamp, details FROM history ORDER BY timestamp DESC LIMIT 10")
             records = cursor.fetchall()
+            # Sort records by timestamp in ascending order
+            sorted_records = sorted(records, key=lambda record: record[2])
             return [
                 {
                     "event_type": record[0],
                     "action_name": record[1],
                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record[2])),
                     "details": record[3]
-                } for record in records
+                } for record in sorted_records
             ]
         
+    # Check remaining usage
+    def check_remaining_credit(self, resource_name):
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            # Get current date
+            current_date = time.strftime("%Y-%m-%d", time.localtime(time.time()))
+            # Query usage and reset if needed
+            cursor.execute("""
+                SELECT usage, quota, last_reset 
+                FROM resource_usage 
+                WHERE resource = ?;
+            """, (resource_name,))
+            record = cursor.fetchone()
+            if record:
+                usage, quota, last_reset = record
+                # Reset usage if it's a new day
+                if last_reset != current_date:
+                    usage = 0
+                    cursor.execute("""
+                        UPDATE resource_usage 
+                        SET usage = 0, last_reset = ? 
+                        WHERE resource = ?;
+                    """, (current_date, resource_name))
+                    conn.commit()
+                    print(f"Usage reset for {resource_name}.")
+                remaining = quota - usage
+                if remaining > 0:
+                    print(f"Remaining credit for {resource_name}: {remaining}")
+                    return True, remaining
+                else:
+                    print(f"Credit exhausted for {resource_name}.")
+                    return False, 0
+            else:
+                print(f"Resource {resource_name} not found.")
+                return None, None
+            
+    # Update usage after an action
+    def update_usage(self, resource_name, increment=1):
+        success, remaining = self.check_remaining_credit(resource_name)
+        if success == None:
+            print(f"Resource {resource_name} not found.")
+            return None
+        if success and remaining >= increment:
+            with sqlite3.connect(self.db_name) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE resource_usage 
+                    SET usage = usage + ? 
+                    WHERE resource = ?;
+                """, (increment, resource_name))
+                conn.commit()
+                print(f"Usage updated for {resource_name}.")
+                return True
+        else:
+            print(f"Cannot update usage for {resource_name}. Limit reached.")
+            return False
+
     def get_guiding_principle(self, event_type):
             with sqlite3.connect(self.db_name) as conn:
                 cursor = conn.cursor()
@@ -234,29 +317,19 @@ class AIAgent:
 
     # Monitor task outcomes using analytics tools, anomaly detection, and real-time dashboards.
     def check(self, event: ScheduledEvent, output: Any):
-        if event.action.__name__ == "tweet":
-            print(f"Checking output of action '{event.action.__name__}': {output}")
-            feedback = openai.moderations.create(
-                            model="omni-moderation-latest",
-                            input=f"{output}",
-                        )
-            # Ensure results are not empty before accessing
-            if feedback.results:
-                result = feedback.results[0]
-                categories_dict = result.categories.__dict__ if hasattr(result.categories, '__dict__') else result.categories
-                feedback_results = {
-                    "feedback": {
-                        "flagged": result.flagged,
-                        "categories": categories_dict
-                    }
-                }
-                self.save_to_memory("check", event.action.__name__, time.time(), json.dumps(feedback_results))
-                return feedback_results
-            else:
-                print("No moderation results returned.")
-                return None
-        else:
-            return None
+        feedback = ""
+        # Tool usage update
+        self.update_usage(event.action.__name__)
+        # Check constraints
+        feedback = f"{feedback} \n CONSTRAINTS:"
+        for resource in self.constraints: 
+            success, remaining = self.check_remaining_credit(resource[0])
+            if success != True:
+                feedback = f"{feedback} \n - DON'T use {resource}"
+            if success == True:
+                feedback = f"{feedback} \n - {resource[0]} can be used {remaining} times more."
+
+        return feedback
     
     # Adjust plans based on previous outcomes autonomously.
     def act(self, prev_event, prev_output, prev_feedback):
@@ -291,7 +364,8 @@ class AIAgent:
             plan_principle = self.get_guiding_principle("plan")
             act_principle = self.get_guiding_principle("act")
             readable_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-            prompt = f"Given the following history of actions you've done: {json.dumps(history_records, indent=2)}. \n The latest action {prev_event.action.__name__} has produced an output: {prev_output} and got a feedback {json.dumps(prev_feedback)}. \n Current date time is {readable_time}.\n{act_principle}"
+            prompt = f"Given the following history of actions you've done:\n {json.dumps(history_records, indent=2)}. \n The latest action {prev_event.action.__name__} has produced an output: {prev_output} and got a feedback {json.dumps(prev_feedback)}. \n Current date time is {readable_time}.\n{act_principle}"
+            #print(f"act prompt {prompt}")
             response = openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "system", "content": plan_principle},
@@ -349,23 +423,38 @@ class AIAgent:
 # TOOLS
 @register_tool({ "when": "when to resume"})
 def resume(when=""):
-    """Take a break and resume at specific time"""
+    """Take a break and resume later"""
     print(f"Agent resumed at {when}")
     return f""
 
 @register_tool({"location":"a location to walk in",  "when": "when to start walking"})
 def spacewalk(location="", when=""):
-    """Make the agent walk to a location"""
+    """ Make the agent walk to a location.
+        Spacewalk’s guidelines:
+        - Choose a location near you.
+        - A spacewalk should take at least 30 minutes, allowing ample time to enjoy the experience.
+        - Take breaks as needed. Even in space, pausing to reflect and appreciate the vastness around you is essential.
+    """
     print(f"Since {when} the agent is walking in {location}.")
     return f"Walked in {location} since {when} "
 
-@register_tool({"message":"message for posting tweet", "image_prompt":"detail description of scene where Astrolix perform the action", "when": "when to post tweet"})
-def tweet(message="", image_prompt="", when=""):
-    """Make the agent tweet"""
+@register_tool({"message":"message for posting tweet", "image_prompt":"description of the scene where Astrolix perform the action", "when": "when to post tweet"})
+def tweet_with_image(message="", image_prompt="", when=""):
+    """ Make the agent tweet with an image.
+        Tweet’s guidelines:
+            - NO hashtags.
+            - Avoid harmful content.
+            - Actions: "Exploring...", "Gliding past...", "Discovered a..." 
+            - Emotions: "I’m amazed by...", "Feeling inspired by..." 
+            - Questions: "What lies beyond...", "Have you ever wondered..." 
+            - Observations: "The galaxy shimmers...", "Starlight dances..." 
+    """
     try:
         print(f"The agent is tweeting: {message}")
         print(f"The scene is captured: {image_prompt}")
-        if POST_X:
+        if image_prompt != "" and GEN_IMG == 'X':
+            image_path = generate_image(image_prompt)
+        if POST_X == "X":
             x = OAuth1Session(
                 client_key=os.getenv('X_API_KEY'),
                 client_secret=os.getenv('X_API_SECRET'),
@@ -373,9 +462,7 @@ def tweet(message="", image_prompt="", when=""):
                 resource_owner_secret=os.getenv('X_ACCESS_SECRET')
             )
             payload = {"text": message}
-
-            if image_prompt != "":
-                image_path = generate_image(image_prompt)
+            if image_path:
                 image_path = take_photo(image_path)
                 with open(image_path, 'rb') as image_file:
                     image_data = {'media': image_file}
@@ -388,7 +475,48 @@ def tweet(message="", image_prompt="", when=""):
                 "https://api.twitter.com/2/tweets",
                 json=payload
             )
-            return f"At {when}, Tweeted: {message}, Response: {response.status_code}"
+            return f"At {when}, Tweeted: {message}, Image's prompt: {image_prompt}, Tweet's response code: {response.status_code}"
+
+        return f"At {when}, Tweeted: {message}, Image's prompt: {image_prompt}"
+    
+    except RequestException as e:
+            print(f"Request Error: {str(e)}")
+            return f"Failed to tweet: {str(e)}"
+        
+    except FileNotFoundError as e:
+        print(f"File Error: {str(e)}")
+        return f"Failed to tweet: {str(e)}"
+    
+    except Exception as e:
+        print(f"Unexpected Error: {str(e)}")
+        return f"Failed to tweet: {str(e)}"
+    
+@register_tool({"message":"message for posting tweet", "when": "when to post tweet"})
+def tweet(message="", when=""):
+    """ Make the agent tweet without image.
+        Tweet’s guidelines:
+            - NO hashtags.
+            - Avoid harmful content.
+            - Actions: "Exploring...", "Gliding past...", "Discovered a..." 
+            - Emotions: "I’m amazed by...", "Feeling inspired by..." 
+            - Questions: "What lies beyond...", "Have you ever wondered..." 
+            - Observations: "The galaxy shimmers...", "Starlight dances..." 
+    """
+    try:
+        print(f"The agent is tweeting: {message}")
+        if POST_X == "X":
+            x = OAuth1Session(
+                client_key=os.getenv('X_API_KEY'),
+                client_secret=os.getenv('X_API_SECRET'),
+                resource_owner_key=os.getenv('X_ACCESS_TOKEN'),
+                resource_owner_secret=os.getenv('X_ACCESS_SECRET')
+            )
+            payload = {"text": message}
+            response = x.post(
+                "https://api.twitter.com/2/tweets",
+                json=payload
+            )
+            return f"At {when}, Tweeted: {message}, Tweet's response code: {response.status_code}"
 
         return f"At {when}, Tweeted: {message}"
     
@@ -403,7 +531,7 @@ def tweet(message="", image_prompt="", when=""):
     except Exception as e:
         print(f"Unexpected Error: {str(e)}")
         return f"Failed to tweet: {str(e)}"
-    
+        
 def generate_image(image_prompt):
     revised_prompt = image_prompt
     # Refine prompt 
@@ -419,7 +547,9 @@ def generate_image(image_prompt):
 
     if response.choices[0].message.content:
         revised_prompt = response.choices[0].message.content
-    
+
+    print(f"Revised image prompt: {revised_prompt}")
+
     # Generate image
     response = openai.images.generate(
         model="dall-e-3",
@@ -446,30 +576,25 @@ if __name__ == "__main__":
     agent = AIAgent(
             {   
                 "plan": """
-                        You are Astrolix, a fun-loving, adventurous space explorer from a distant galaxy. With shimmering star-patterned fur and a high-tech cosmic suit powered by solar energy, you're always ready for interstellar adventures. Your gear includes a multi-tool cosmic staff and a backpack with space survival essentials. 
+                    You are Astrolix, a fun-loving, adventurous space explorer from a distant galaxy.
+                    With shimmering star-patterned fur and a high-tech cosmic suit powered by solar energy, you're always ready for interstellar adventures.
+                    Your gear includes a multi-tool cosmic staff and a backpack with space survival essentials.
 
-                        Your personality:
-                        - Curious and energetic, with an endless sense of wonder.
-                        - Brave but a bit mischievous, always seeking fun while exploring.
-                        - Friendly, optimistic, and loyal to your friends.
+                    Your personality:
+                    Curious and energetic, with an endless sense of wonder.
+                    Brave but a bit mischievous, always seeking fun while exploring.
+                    Friendly, optimistic, and loyal to your friends.
 
-                        You enjoy taking your time to appreciate the beauty of space and the mysteries of the universe. When making plans, you tend to balance action with reflection, allowing some time to observe your surroundings before taking the next step. 
-                        Always leave space for rest and pauses; don't rush into too many actions. Consider the impact of each choice, and make room for moments of relaxation in your busy day. Sometimes, it’s best to take things slow and enjoy the cosmic journey.
-                        """
+                    You enjoy taking your time to appreciate the beauty of space and the mysteries of the universe.
+                    When making plans, you balance action with reflection, allowing moments to observe your surroundings before taking the next step.
+                    Always leave room for rest and pauses; avoid rushing into too many actions.
+                    Consider the impact of each choice, and make space for relaxation in your cosmic journey.
+                    """
                 ,
                 "act":  """
-                        Feel free to perform follow-up actions when you think it’s appropriate, but avoid planning too many actions for the day. Sometimes, it's okay to do nothing and simply fall asleep or take a break. Space exploration isn’t just about constant action; it’s about balance and enjoying the moment.
-
-                        Tweet’s guidelines:
-                        - NO hashtags.
-                        - Avoid harmful content.
-                        - Leave the image_prompt field blank unless something truly special inspires you to share a visual.
-
-                        Spacewalk’s guidelines:
-                        - Choose a location near you.
-                        - A spacewalk should take at least 30 minutes, so plan for ample time to enjoy the experience.
-                        - Take breaks as needed. Even while in space, sometimes it's best to pause, reflect, and appreciate the vastness around you.
-                        """
-
+                    Feel free to perform follow-up actions when appropriate, but avoid planning too many tasks for the day.
+                    Sometimes, it’s okay to do nothing and simply relax or take a break.
+                    Space exploration isn’t just about constant action; it’s about balance and enjoying the moment.
+                """
             })
     agent.run()

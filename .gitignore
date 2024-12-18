@@ -59,7 +59,7 @@ cython_debug/
 # Skip images folder
 images/
 
-# Skip images folder
+# Skip memory folder
 memory/
 
 *.dylib
