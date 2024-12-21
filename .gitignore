@@ -59,6 +59,9 @@ cython_debug/
 # Skip images folder
 images/
 
+# Skip media folder
+media/
+
 # Skip memory folder
 memory/
 
