@@ -16,6 +16,11 @@ from PIL import Image
 import cairosvg
 from io import BytesIO
 import random
+from studio import *
+from dotenv import load_dotenv
+import mimetypes
+
+load_dotenv()
 
 # Astrolix portrait
 # SVG content
@@ -61,9 +66,18 @@ TOOL_REGISTRY = []
 
 # Post to X or not
 POST_X = os.getenv("POST_X")
-
+if POST_X == "X":
+    print(f"Allowed posting to X")
 # Gen image or not
 GEN_IMG = os.getenv("GEN_IMG")
+if GEN_IMG == "X":
+    print(f"Allowed generating image")
+
+
+X_API_KEY=os.getenv('X_API_KEY')
+X_API_SECRET=os.getenv('X_API_SECRET')
+X_ACCESS_TOKEN=os.getenv('X_ACCESS_TOKEN')
+X_ACCESS_SECRET=os.getenv('X_ACCESS_SECRET')
 
 def python_type_to_json_type(py_type):
     type_mapping = {
@@ -76,7 +90,7 @@ def python_type_to_json_type(py_type):
     }
     return type_mapping.get(py_type, "string")
 
-def register_tool(param_descriptions=None):
+def tool(param_descriptions=None):
     if param_descriptions is None:
         param_descriptions = {}
         
@@ -130,6 +144,7 @@ class AIAgent:
         self.event_queue = []
         self.running = False
         self.constraints = [
+            ("filming", 0, 2, time.strftime("%Y-%m-%d", time.localtime(time.time()))),
             ("tweet_with_image", 0, 2, time.strftime("%Y-%m-%d", time.localtime(time.time()))),
             ("tweet", 0, 15, time.strftime("%Y-%m-%d", time.localtime(time.time()))),
         ]
@@ -339,7 +354,10 @@ class AIAgent:
             when = params.pop('when', None)
             if when:
                 if isinstance(when, str):
-                    timestamp = datetime.datetime.strptime(when, "%Y-%m-%d %H:%M:%S").timestamp()
+                    try:
+                        timestamp = datetime.datetime.strptime(when, "%Y-%m-%d %H:%M:%S").timestamp()
+                    except ValueError as e:
+                        timestamp = datetime.datetime.strptime(when, "%Y-%m-%dT%H:%M:%SZ").timestamp()
                 else:
                     timestamp = when.timestamp()  
                 params['when'] = when
@@ -420,14 +438,14 @@ class AIAgent:
         except AttributeError as e:
             print(e)
 
-# TOOLS
-@register_tool({ "when": "when to resume"})
+# ACTIONS
+@tool({ "when": "when to resume"})
 def resume(when=""):
     """Take a break and resume later"""
     print(f"Agent resumed at {when}")
     return f""
 
-@register_tool({"location":"a location to walk in",  "when": "when to start walking"})
+@tool({"location":"a location to walk in",  "when": "when to start walking"})
 def spacewalk(location="", when=""):
     """ Make the agent walk to a location.
         Spacewalk’s guidelines:
@@ -437,8 +455,137 @@ def spacewalk(location="", when=""):
     """
     print(f"Since {when} the agent is walking in {location}.")
     return f"Walked in {location} since {when} "
+@tool({"message":"message for posting tweet", "scene":"detail description of the scene", "when": "when to start walking"})
+def filming(message="",scene="", when=""):
+    """ Film the agent's activity in space.
+    """
+    try:
+        print(f"The agent is tweeting: {message}")
+        print(f"The scene is captured: {scene}")
+        image_path = None
+        final_clip = None
+        if scene != "":
+            if GEN_IMG == 'X':
+                image_path = generate_image(scene)
+            if image_path:
+                clip_path = render_bird_animation() 
+                final_clip = render_scene("media", image_path, clip_path)
+        if POST_X == "X":
+            x = OAuth1Session(
+                client_key=X_API_KEY,
+                client_secret=X_API_SECRET,
+                resource_owner_key=X_ACCESS_TOKEN,
+                resource_owner_secret=X_ACCESS_SECRET
+            )
+            payload = {"text": message}
+            if final_clip:
+                # Get the MIME type of the video file
+                mime_type, _ = mimetypes.guess_type(final_clip)
+                
+                if not mime_type:
+                    print(f"Error: Could not determine MIME type for the file: {final_clip}")
+                    return "Failed to tweet: Unrecognized file type"
+                
+                # Init upload
+                total_bytes = os.path.getsize(final_clip)
+                request_data = {
+                        'command': 'INIT',
+                        'media_type': mime_type,
+                        'total_bytes': total_bytes,
+                        'media_category': 'tweet_video'
+                    }
+                media_id = None
+                init_response = x.post(f"https://upload.twitter.com/1.1/media/upload.json", data=request_data)
+                if init_response.status_code > 200 and init_response.status_code < 299 :
+                    media_id = init_response.json()['media_id']
+                    media_id_str = init_response.json()['media_id_string']
+                # Upload media chunks
+                if media_id:
+                    segment_id = 0
+                    bytes_sent = 0
+                    video_file = open(final_clip, 'rb')
+                    while bytes_sent < total_bytes:
+                        chunk = video_file.read(4*1024*1024)
+                        
+                        print('APPEND')
 
-@register_tool({"message":"message for posting tweet", "image_prompt":"description of the scene where Astrolix perform the action", "when": "when to post tweet"})
+                        request_data = {
+                            'command': 'APPEND',
+                            'media_id': media_id,
+                            'segment_index': segment_id
+                        }
+
+                        files = {
+                            'media':chunk
+                        }
+
+                        upload_response = x.post(url="https://upload.twitter.com/1.1/media/upload.json", data=request_data, files=files)
+
+                        if upload_response.status_code < 200 or upload_response.status_code > 299:
+                            print(upload_response.status_code)
+                            print(upload_response.text)
+
+                        segment_id = segment_id + 1
+                        bytes_sent = video_file.tell()
+
+                        print('%s of %s bytes uploaded' % (str(bytes_sent), str(total_bytes)))
+
+                        print('Upload chunks complete.')
+                    # Finalize upload request
+                    request_data = {
+                        'command': 'FINALIZE',
+                        'media_id': media_id
+                        }
+
+                    final_reponse = x.post(url="https://upload.twitter.com/1.1/media/upload.json", data=request_data)
+                    print(final_reponse.json())
+                    processing_info = final_reponse.json().get('processing_info', None)
+                    if processing_info:
+                        state = processing_info['state']
+                        print('Media processing status is %s ' % state)
+                        if state == u'succeeded':
+                            payload["media"] = {"media_ids": [media_id_str]}
+                        if state == u'failed':
+                            return f"Failed "
+
+                        check_after_secs = processing_info['check_after_secs']
+                        
+                        print('Checking after %s seconds' % str(check_after_secs))
+                        time.sleep(check_after_secs)
+
+                        payload["media"] = {"media_ids": [media_id_str]}
+                else:
+                    print(f"Request Error: {str(init_response.text)}")
+                    return f"Failed to tweet: {str(init_response.text)}"
+
+            response = x.post(
+                "https://api.twitter.com/2/tweets",
+                json=payload
+            )
+
+            if response.status_code > 200 and response.status_code < 299 :
+                print(f"At {when}, Tweeted: {message}, Scene: {scene}, Tweet's response code: {response.status_code}")
+                return f"At {when}, Tweeted: {message}, Scene: {scene}, Tweet's response code: {response.status_code}"
+            else:
+                print(f"Request Error: {str(response.text)}")
+                return f"Failed to tweet: {str(response.text)}"
+            
+        print(f"At {when}, Tweeted: {message}, Scene: {scene}")
+        return f"At {when}, Tweeted: {message}, Scene: {scene}"
+    
+    except RequestException as e:
+            print(f"Request Error: {str(e)}")
+            return f"Failed to tweet: {str(e)}"
+        
+    except FileNotFoundError as e:
+        print(f"File Error: {str(e)}")
+        return f"Failed to tweet: {str(e)}"
+    
+    except Exception as e:
+        print(f"Unexpected Error: {str(e)}")
+        return f"Failed to tweet: {str(e)}"
+
+@tool({"message":"message for posting tweet", "image_prompt":"description of the scene where Astrolix perform the action", "when": "when to post tweet"})
 def tweet_with_image(message="", image_prompt="", when=""):
     """ Make the agent tweet with an image.
         Tweet’s guidelines:
@@ -452,14 +599,15 @@ def tweet_with_image(message="", image_prompt="", when=""):
     try:
         print(f"The agent is tweeting: {message}")
         print(f"The scene is captured: {image_prompt}")
+        image_path = None
         if image_prompt != "" and GEN_IMG == 'X':
             image_path = generate_image(image_prompt)
         if POST_X == "X":
             x = OAuth1Session(
-                client_key=os.getenv('X_API_KEY'),
-                client_secret=os.getenv('X_API_SECRET'),
-                resource_owner_key=os.getenv('X_ACCESS_TOKEN'),
-                resource_owner_secret=os.getenv('X_ACCESS_SECRET')
+                client_key=X_API_KEY,
+                client_secret=X_API_SECRET,
+                resource_owner_key=X_ACCESS_TOKEN,
+                resource_owner_secret=X_ACCESS_SECRET
             )
             payload = {"text": message}
             if image_path:
@@ -475,8 +623,9 @@ def tweet_with_image(message="", image_prompt="", when=""):
                 "https://api.twitter.com/2/tweets",
                 json=payload
             )
+            print(f"At {when}, Tweeted: {message}, Image's prompt: {image_prompt}, Tweet's response code: {response.status_code}")
             return f"At {when}, Tweeted: {message}, Image's prompt: {image_prompt}, Tweet's response code: {response.status_code}"
-
+        print(f"At {when}, Tweeted: {message}, Image's prompt: {image_prompt}")
         return f"At {when}, Tweeted: {message}, Image's prompt: {image_prompt}"
     
     except RequestException as e:
@@ -491,7 +640,7 @@ def tweet_with_image(message="", image_prompt="", when=""):
         print(f"Unexpected Error: {str(e)}")
         return f"Failed to tweet: {str(e)}"
     
-@register_tool({"message":"message for posting tweet", "when": "when to post tweet"})
+@tool({"message":"message for posting tweet", "when": "when to post tweet"})
 def tweet(message="", when=""):
     """ Make the agent tweet without image.
         Tweet’s guidelines:
@@ -506,18 +655,19 @@ def tweet(message="", when=""):
         print(f"The agent is tweeting: {message}")
         if POST_X == "X":
             x = OAuth1Session(
-                client_key=os.getenv('X_API_KEY'),
-                client_secret=os.getenv('X_API_SECRET'),
-                resource_owner_key=os.getenv('X_ACCESS_TOKEN'),
-                resource_owner_secret=os.getenv('X_ACCESS_SECRET')
+                client_key=X_API_KEY,
+                client_secret=X_API_SECRET,
+                resource_owner_key=X_ACCESS_TOKEN,
+                resource_owner_secret=X_ACCESS_SECRET
             )
             payload = {"text": message}
             response = x.post(
                 "https://api.twitter.com/2/tweets",
                 json=payload
             )
-            return f"At {when}, Tweeted: {message}, Tweet's response code: {response.status_code}"
-
+            print(f"At {when}, Tweeted: {message}, API status code: {response.status_code}")
+            return f"At {when}, Tweeted: {message}, API status code: {response.status_code}"
+        print(f"At {when}, Tweeted: {message}")
         return f"At {when}, Tweeted: {message}"
     
     except RequestException as e:
@@ -536,11 +686,14 @@ def generate_image(image_prompt):
     revised_prompt = image_prompt
     # Refine prompt 
     prompt = f"Detail description of the backdrop image for the scene {image_prompt}"
-
+    system_prompt = f"""
+        DONT include main character Astralix to the backdrop
+        A stunning galaxy scene illuminated by a radiant sunbeam emerging from its core. The galaxy spirals majestically with vibrant, glowing arms of stars, dust, and gas, painted in vivid shades of blue, purple, and pink. The sunbeam, golden and ethereal, cuts through the center, radiating light outward and casting a warm, heavenly glow on the surrounding space. Twinkling stars, distant nebulae, and clusters of light populate the background, enhancing the sense of depth and immensity. The overall atmosphere is awe-inspiring, capturing the magnificence of the cosmos bathed in a celestial light.
+    """
     response = openai.chat.completions.create(
         model="gpt-4o-mini",
         messages=[ 
-                {"role": "system", "content": "DON'T include main character Astralix to the backdrop"} ,
+                {"role": "system", "content": system_prompt} ,
                 {"role": "user", "content": prompt} 
             ]
     )

@@ -1,5 +1,8 @@
 CairoSVG==2.7.1
-openai==1.57.4
+manim==0.18.1
+moviepy==2.1.1
+openai==1.58.1
 Pillow==11.0.0
+python-dotenv==1.0.1
 Requests==2.32.3
 requests_oauthlib==2.0.0
