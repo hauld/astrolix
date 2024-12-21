@@ -1,6 +1,7 @@
 # Astrolix - The Cosmic Explorer
 
 **Astrolix** is a cosmic adventurer character designed for creative storytelling, and interactive experiences. This repository contains assets, prompts, and creative resources centered around Astrolix’s interstellar journeys.
+Follow Astrolix's journey on X [@AstrolixVoyager](https://x.com/AstrolixVoyager)
 
 ## 🌌 About Astrolix
 Astrolix is a fun-loving, adventurous space explorer from a distant galaxy. With shimmering star-patterned fur and a high-tech cosmic suit powered by solar energy, he’s always ready for interstellar adventures. His mission is to explore unknown worlds, help creatures in need, and uncover cosmic mysteries.
