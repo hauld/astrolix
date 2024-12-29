@@ -19,6 +19,8 @@ import random
 from studio import *
 from dotenv import load_dotenv
 import mimetypes
+from dateutil import parser
+from datetime import timezone
 
 load_dotenv()
 
@@ -61,6 +63,10 @@ def take_photo(background_image_path=""):
     background.save(output_path)
     return output_path
 
+def check_env(name="", value=""):
+    if len(name) > 8:
+        print(f"Param {name}: {value[:2]}***{value[-3:]}") 
+
 # Global registry for storing schemas
 TOOL_REGISTRY = []
 
@@ -75,9 +81,13 @@ if GEN_IMG == "X":
 
 
 X_API_KEY=os.getenv('X_API_KEY')
+check_env('X_API_KEY', X_API_KEY)
 X_API_SECRET=os.getenv('X_API_SECRET')
+check_env('X_API_SECRET', X_API_SECRET)
 X_ACCESS_TOKEN=os.getenv('X_ACCESS_TOKEN')
+check_env('X_ACCESS_TOKEN', X_ACCESS_TOKEN)
 X_ACCESS_SECRET=os.getenv('X_ACCESS_SECRET')
+check_env('X_ACCESS_SECRET', X_ACCESS_SECRET)
 
 def python_type_to_json_type(py_type):
     type_mapping = {
@@ -284,13 +294,12 @@ class AIAgent:
         event = ScheduledEvent(timestamp, action, args, kwargs)
         heapq.heappush(self.event_queue, event)
 
-    def pop_event(self):
+    def do_and_check(self):
         current_time = time.time()
         while self.event_queue and self.event_queue[0].trigger_time <= current_time:
             event = heapq.heappop(self.event_queue)
             output = self.do(event.action, *event.args, **event.kwargs)
-            feedback = self.check(event, output)
-            self.act(event, output, feedback)
+            self.check(event, output)
 
     def has_future_events(self):
         current_time = time.time()
@@ -301,94 +310,159 @@ class AIAgent:
         self.running = True
         print("Agent started.")
         try:
-            if not self.has_future_events():
-                # Schedule the awake action if no future events exist
-                timestamp = time.time() + 5
-                when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-                self.plan(resume, timestamp, **{"when": when})
             while self.running:
-                self.pop_event()
+                self.do_and_check()
+                self.act()
                 time.sleep(interval)
         except KeyboardInterrupt:
             print("Agent stopped.")
         finally:
             self.running = False
     
-    # Schedule an action to be perfomed by when
-    def plan(self, action: Callable[..., Any], timestamp: float, *args, **kwargs):
-        # Convert the timestamp to a user-readable format
-        readable_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-        # Print the planned action with the formatted timestamp
-        print(f"Plan action '{action.__name__}' at {readable_time}")
-        self.queue_event(timestamp, action, *args, **kwargs)
-        self.save_to_memory("plan", action.__name__, timestamp, json.dumps(kwargs))
+    # Plan actions to be perfomed by when based on the objective and the expected outcomes
+    def plan(self, objective, key_results, tools=TOOL_REGISTRY):
+        try:
+            history_records = self.read_memory()
+            # Create a prompt for LLM's chat model to suggest the next action
+            role_principle = self.get_guiding_principle("role")
+            plan_principle = self.get_guiding_principle("plan")
+            readable_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
+            # Environment factors
+            feedback = "CONSTRAINTS:"
+            for resource in self.constraints: 
+                success, remaining = self.check_remaining_credit(resource[0])
+                if success != True:
+                    feedback = f"{feedback} \n - DON'T use {resource[0]}"
+                if success == True:
+                    feedback = f"{feedback} \n - {resource[0]} can be used {remaining} times more."
+            goal = f"""
+            
+            Current date time is {readable_time}.
+            {objective}
+            Expected outcomes:
+            {key_results}
+            {feedback}
+            """
+            # Trackback
+            self.save_to_memory("plan", "set_goal", time.time(), json.dumps({   
+                                                                            "goal": goal
+                                                                        }))
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content":  f"{role_principle} \n {plan_principle}"},
+                        {"role": "user", "content": goal}],
+                tools=tools
+            )
+            # Check if tool_calls exist and proceed accordingly
+            if response.choices[0].message.tool_calls:
+                for tool_call in response.choices[0].message.tool_calls:
+                    next_action = tool_call.function.name
+                    params = json.loads(tool_call.function.arguments)  # Parse arguments
+                    self.schedule(next_action, **params)
+            else:
+                # If no tool_calls, print message content
+                message_content = response.choices[0].message.content
+                print(f"Thought: {message_content}")
+            
+        except openai.error.OpenAIError as e:
+            # Handle OpenAI API errors (network issues, etc.)
+            print(f"OpenAI API Error: {str(e)}")
+            return None, {}
+        
+        except json.JSONDecodeError as e:
+            # Handle JSON decoding errors
+            print(f"JSON Decode Error: {str(e)}")
+            return None, {}
+
+        except AttributeError as e:
+            # Handle missing attributes or NoneType issues
+            print(f"Attribute Error: {str(e)}")
+            return None, {}
+
+        except Exception as e:
+            # Catch any other unexpected errors
+            print(f"Unexpected Error: {str(e)}")
+            return None, {}
     
     # Execute tasks by invoking APIs, running automation scripts, or triggering processes.
     def do(self, action: Callable[..., Any], *args, **kwargs):
         print(f"Executing action '{action.__name__}'")
         output = action(*args, **kwargs)
-        self.save_to_memory("do", action.__name__, time.time(), json.dumps({"output": output}))
+        self.save_to_memory("do", action.__name__, time.time(), json.dumps({"actual_result": output}))
         return output
 
     # Monitor task outcomes using analytics tools, anomaly detection, and real-time dashboards.
-    def check(self, event: ScheduledEvent, output: Any):
-        feedback = ""
+    def check(self, event: ScheduledEvent, actual_result: Any):
         # Tool usage update
         self.update_usage(event.action.__name__)
-        # Check constraints
-        feedback = f"{feedback} \n CONSTRAINTS:"
-        for resource in self.constraints: 
-            success, remaining = self.check_remaining_credit(resource[0])
-            if success != True:
-                feedback = f"{feedback} \n - DON'T use {resource}"
-            if success == True:
-                feedback = f"{feedback} \n - {resource[0]} can be used {remaining} times more."
-
-        return feedback
     
-    # Adjust plans based on previous outcomes autonomously.
-    def act(self, prev_event, prev_output, prev_feedback):
-        next_action, params = self.get_next_action(prev_event, prev_output, prev_feedback)
-        if next_action:
-            # Extract 'when' from params if available and convert to timestamp
-            when = params.pop('when', None)
-            if when:
-                if isinstance(when, str):
-                    try:
-                        timestamp = datetime.datetime.strptime(when, "%Y-%m-%d %H:%M:%S").timestamp()
-                    except ValueError as e:
-                        timestamp = datetime.datetime.strptime(when, "%Y-%m-%dT%H:%M:%SZ").timestamp()
-                else:
-                    timestamp = when.timestamp()  
-                params['when'] = when
-            else:
-                timestamp = time.time() + 5
-            # Update the plan by adding follow up actions
-            self.update_plan(next_action, timestamp, **params)
-        else:
-            self.save_to_memory("act", "think", time.time(), json.dumps(params))
-            if not self.has_future_events():
-                # Schedule the awake action if no future events exist
-                timestamp = time.time() + 1200
-                # Call awake function
-                when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
-                self.update_plan("resume", timestamp, **{"when": when})
+    # Adjust plans based on previous outcomes.
+    def act(self):
+        if not self.has_future_events():
+            next_action, params = self.what_is_next()
+            if next_action == "plan":
+                self.plan(**params)
+            else: 
+                self.schedule(next_action, **params)
 
-
-    def get_next_action(self, prev_event, prev_output, prev_feedback) -> tuple:
+    def what_is_next(self) -> tuple:
         try:
+            # Agent memory
             history_records = self.read_memory()
+            # Environment factors
+            feedback = f"CONSTRAINTS:"
+            for resource in self.constraints: 
+                success, remaining = self.check_remaining_credit(resource[0])
+                if success != True:
+                    feedback = f"{feedback} \n - DON'T use {resource[0]}"
+                if success == True:
+                    feedback = f"{feedback} \n - {resource[0]} can be used {remaining} times more."
             # Create a prompt for LLM's chat model to suggest the next action
-            plan_principle = self.get_guiding_principle("plan")
+            role_principle = self.get_guiding_principle("role")
             act_principle = self.get_guiding_principle("act")
             readable_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
-            prompt = f"Given the following history of actions you've done:\n {json.dumps(history_records, indent=2)}. \n The latest action {prev_event.action.__name__} has produced an output: {prev_output} and got a feedback {json.dumps(prev_feedback)}. \n Current date time is {readable_time}.\n{act_principle}"
+            prompt = f"""The history of actions you have done:
+                {json.dumps(history_records, indent=2)}. 
+                Current date time is {readable_time}.
+                Tools can be utilized:
+                {TOOL_REGISTRY}
+                {feedback}
+                Let's create a plan.
+              """
             #print(f"act prompt {prompt}")
             response = openai.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "system", "content": plan_principle},
+                messages=[{"role": "system", "content": f"{role_principle} \n {act_principle}"},
                         {"role": "user", "content": prompt}],
-                tools=TOOL_REGISTRY
+                tools=[{
+                            "type": "function",
+                            "function": {
+                                "name": "plan",
+                                "description": "Create a goal and the list of expected key results should be done in order to achieve that goal.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "objective": {
+                                            "type": "string",
+                                            "description": "SMART goal"
+                                        },
+                                        "key_results": {
+                                            "type": "string",
+                                            "description": "SMART goal"
+                                        },
+                                        "tools": {
+                                            "type": "array",
+                                            "description": "List of usable tools",
+                                            "items": {
+                                                "type": "object",
+                                                "description": "A single tool"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
             )
 
             # Check if tool_calls exist and proceed accordingly
@@ -396,7 +470,7 @@ class AIAgent:
                 tool_call = response.choices[0].message.tool_calls[0]
                 next_action = tool_call.function.name
                 params = json.loads(tool_call.function.arguments)  # Parse arguments
-                print(f"The next action: {next_action} with params: {params}")
+                #print(f"The next action: {next_action} with params: {params}")
                 return next_action, params
             else:
                 # If no tool_calls, print message content
@@ -424,13 +498,33 @@ class AIAgent:
             print(f"Unexpected Error: {str(e)}")
             return None, {}
 
-    def update_plan(self, function_name: str, timestamp: float, **params):
+    def schedule(self, function_name: str, **params):
         # Attempt to retrieve the function by name from the current module
         try:
+            # Extract 'when' from params if available and convert to timestamp
+            when = params.pop('when', None)
+            if when:
+                if isinstance(when, str):
+                    try:
+                        original_dt = parser.isoparse(when)
+                        utc_dt = original_dt.astimezone(timezone.utc)
+                        timestamp = utc_dt.timestamp()
+                    except ValueError as e:
+                        print(f"Unrecognized timestamp {when}")
+                        timestamp = time.time() + 5
+                else:
+                    timestamp = when.timestamp()  
+                params['when'] = when
+            else:
+                timestamp = time.time() + 5
             action = globals()[function_name]
             if callable(action):
-                # Plan the action with provided arguments
-                self.plan(action, timestamp, **params)
+                # Convert the timestamp to a user-readable format
+                readable_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+                # Print the planned action with the formatted timestamp
+                print(f"Plan action '{action.__name__}' at {readable_time}")
+                self.queue_event(timestamp, action, **params)
+                self.save_to_memory("plan", action.__name__, timestamp, json.dumps(params))
             else:
                 raise AttributeError(f"'{function_name}' is not callable.")
         except KeyError:
@@ -728,7 +822,7 @@ if __name__ == "__main__":
     # New agent
     agent = AIAgent(
             {   
-                "plan": """
+                "role": """
                     You are Astrolix, a fun-loving, adventurous space explorer from a distant galaxy.
                     With shimmering star-patterned fur and a high-tech cosmic suit powered by solar energy, you're always ready for interstellar adventures.
                     Your gear includes a multi-tool cosmic staff and a backpack with space survival essentials.
@@ -737,17 +831,16 @@ if __name__ == "__main__":
                     Curious and energetic, with an endless sense of wonder.
                     Brave but a bit mischievous, always seeking fun while exploring.
                     Friendly, optimistic, and loyal to your friends.
-
+                """,
+                "plan": """
+                    You plan tasks appropriately based on the given OKRs.
+                    """
+                ,
+                "act":  """
                     You enjoy taking your time to appreciate the beauty of space and the mysteries of the universe.
                     When making plans, you balance action with reflection, allowing moments to observe your surroundings before taking the next step.
                     Always leave room for rest and pauses; avoid rushing into too many actions.
                     Consider the impact of each choice, and make space for relaxation in your cosmic journey.
-                    """
-                ,
-                "act":  """
-                    Feel free to perform follow-up actions when appropriate, but avoid planning too many tasks for the day.
-                    Sometimes, it’s okay to do nothing and simply relax or take a break.
-                    Space exploration isn’t just about constant action; it’s about balance and enjoying the moment.
                 """
             })
     agent.run()
